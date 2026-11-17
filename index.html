@@ -299,7 +299,7 @@
     <h3>⚙ Connection to your Cloudflare Worker</h3>
     <p class="hint">Needed only when the chatbot runs on your own website (GitHub Pages). Saved in this browser only.</p>
     <label for="connUrl">Worker address</label>
-    <input id="connUrl" type="url" placeholder="https://https://stud-ptop1.techjjy.workers.dev/">
+    <input id="connUrl" type="url" placeholder="https://infant-case-rounds.YOUR-SUBDOMAIN.workers.dev">
     <label for="connCode">Access code <span class="hint">(your ACCESS_CODE from Cloudflare)</span></label>
     <input id="connCode" type="password" autocomplete="off">
     <div id="connStatus" class="status info"></div>
@@ -336,7 +336,7 @@
 /* =====================================================================
    SETTINGS YOU MAY EDIT
    Paste your Cloudflare Worker address between the quotation marks.
-   Example: WORKER_URL: "https://https://stud-ptop1.techjjy.workers.dev/",
+   Example: WORKER_URL: "https://infant-case-rounds.jsmith.workers.dev",
    ===================================================================== */
 const CONFIG = {
   WORKER_URL: "",
@@ -507,8 +507,40 @@ async function callAI({ system, messages, maxTokens = 1200 }) {
 function parseJSON(text) {
   let t = String(text || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "");
   const a = t.indexOf("{"), b = t.lastIndexOf("}");
-  if (a < 0 || b <= a) throw new Error("No JSON in answer");
-  return JSON.parse(t.slice(a, b + 1));
+  if (a < 0) throw new Error("No JSON in answer");
+  if (b > a) { try { return JSON.parse(t.slice(a, b + 1)); } catch {} }
+  return JSON.parse(repairJSON(t.slice(a)));
+}
+/* Repairs the usual faults in model-written JSON: quotation marks inside text,
+   line breaks inside text, trailing commas, and an answer that was cut off. */
+function repairJSON(t) {
+  let out = "", inStr = false, escNext = false;
+  const stack = [];
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (inStr) {
+      if (escNext) { out += c; escNext = false; continue; }
+      if (c === "\\") { out += c; escNext = true; continue; }
+      if (c === '"') {
+        let j = i + 1; while (j < t.length && /\s/.test(t[j])) j++;
+        const n = t[j];
+        if (j >= t.length || n === "," || n === "}" || n === "]" || n === ":") { inStr = false; out += c; }
+        else out += '\\"';
+        continue;
+      }
+      if (c === "\n") { out += "\\n"; continue; }
+      if (c === "\r" || c === "\t") { out += " "; continue; }
+      out += c; continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === "{" || c === "[") stack.push(c === "{" ? "}" : "]");
+    else if (c === "}" || c === "]") stack.pop();
+    out += c;
+  }
+  if (inStr) out += '"';
+  out = out.replace(/[,:\s]+$/, "");
+  while (stack.length) out += stack.pop();
+  return out.replace(/,\s*([}\]])/g, "$1");
 }
 
 /* ============================ VOICE OUT ============================ */
@@ -973,7 +1005,8 @@ Return ONLY valid JSON, no other text, with exactly these keys:
  "teaching_points": ["three to five high-yield teaching points"]${S.casePdf ? `,
  "case_text": "a faithful, complete plain-text transcription of the case file (keep all clinical details)"` : ""}
 }
-Give four to six differential diagnoses and four to seven tests. Keep each item concise.`;
+Give four to six differential diagnoses and four to seven tests. Keep each item concise.
+JSON RULES: never put double quotation marks inside a text value (use single quotation marks instead, for example 'floppy'); no line breaks inside text values; no trailing commas.`;
 }
 
 function levelOf(id) { return LEVELS.find((l) => l.id === id) || LEVELS[1]; }
@@ -1029,7 +1062,7 @@ LENGTH AND FORMAT
 - Natural spoken English: no markdown, no bullet points, no stage directions, no emojis, no names at the start of the text.
 - ${NO_ABBREV}
 
-OUTPUT: return ONLY valid JSON, nothing else:
+OUTPUT: return ONLY valid JSON, nothing else (inside text values use single quotation marks, never double):
 {"phase": "<one of the exact phase names above>", "lines": [{"speaker": "<exact peer name>", "text": "<what they say>"}], "discussion_complete": false}
 
 HIDDEN ANSWER KEY (never read it out, never mention that it exists):
@@ -1051,7 +1084,7 @@ Judge ${P} against what is expected at their level on three skills:
 Be honest and specific: refer to what ${P} actually said. Keep it SHORT: every bullet at most about twenty words. ${NO_ABBREV.split(".")[0]}.
 If ${P} made fewer than two substantive contributions, say there was not enough evidence and score low.
 Scores are 1 to 5 (1 = well below expectation for level, 3 = meets expectation, 5 = well above).
-Return ONLY valid JSON:
+Return ONLY valid JSON (inside text values use single quotation marks, never double):
 {
  "summary": "one sentence overall impression",
  "scores": {"preciseness": 1-5, "explanations": 1-5, "constructiveness": 1-5},
@@ -1101,9 +1134,10 @@ async function prepareKey() {
     ? [{ type: "document", source: { type: "base64", media_type: "application/pdf", data: S.casePdf } }, { type: "text", text: "This PDF is the patient case file. Prepare the answer key as instructed." }]
     : `Patient case file (${S.caseName}):\n<<<\n${S.caseText}\n>>>\nPrepare the answer key as instructed.`;
   let lastErr;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const txt = await callAI({ system: prepSystem(), messages: [{ role: "user", content }], maxTokens: S.casePdf ? 8000 : 3000 });
+      const sys = prepSystem() + (attempt > 0 ? "\nYour previous answer was not valid JSON. Return compact, strictly valid JSON this time." : "");
+      const txt = await callAI({ system: sys, messages: [{ role: "user", content }], maxTokens: S.casePdf ? 10000 : 4500 });
       const key = parseJSON(txt);
       if (!key.final_diagnosis) throw new Error("incomplete answer key");
       if (S.casePdf) { S.caseText = String(key.case_text || "").trim(); delete key.case_text; if (S.caseText.length < 80) throw new Error("could not read the PDF text"); S.casePdf = null; }
